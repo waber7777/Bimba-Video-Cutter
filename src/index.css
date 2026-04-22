@@ -35,7 +35,7 @@ body {
 }
 
 #root {
-  max-width: 1200px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 2rem;
   width: 100%;
@@ -169,7 +169,7 @@ input[type="range"] {
   overflow-y: auto;
   text-align: left;
   border: 1px solid var(--border-color);
-  margin-top: 2rem;
+  margin-top: 1rem;
 }
 
 .status-badge {

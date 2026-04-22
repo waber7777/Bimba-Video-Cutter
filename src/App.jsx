@@ -378,7 +378,7 @@ function App() {
         <p className="subtitle">Локальная обрезка видео без потери качества и серверов</p>
       </header>
 
-      <main className="glass" style={{ padding: '2.5rem', maxWidth: '900px', margin: '0 auto' }}>
+      <main className="glass" style={{ padding: '2rem', maxWidth: '1400px', margin: '0 auto', width: '100%' }}>
         {!videoFile ? (
           <div 
             className="upload-zone"
@@ -401,13 +401,14 @@ function App() {
             <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Поддерживаются MP4, MOV, MKV и др.</span>
           </div>
         ) : (
-          <div className="editor-layout">
+          <div className="editor-layout" style={{ display: 'flex', gap: '2rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+            {/* Левая колонка: Видео */}
             <div 
               style={{ 
+                flex: '1 1 60%',
                 position: 'relative', 
                 display: 'flex', 
-                justifyContent: 'center',
-                marginBottom: '2rem'
+                justifyContent: 'center'
               }}
             >
               <div 
@@ -456,7 +457,9 @@ function App() {
               </div>
             </div>
             
-            <div className="controls-grid" style={{ background: 'rgba(0,0,0,0.2)', padding: '1.5rem', borderRadius: '16px' }}>
+            {/* Правая колонка: Управление */}
+            <div style={{ flex: '1 1 35%', display: 'flex', flexDirection: 'column', gap: '1rem', minWidth: '320px' }}>
+              <div className="controls-grid" style={{ background: 'rgba(0,0,0,0.2)', padding: '1.2rem', borderRadius: '16px', marginTop: 0 }}>
               <div className="control-group">
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <label>Начало</label>
@@ -512,7 +515,7 @@ function App() {
               </div>
             </div>
 
-            <div className="controls-grid" style={{ background: 'rgba(0,0,0,0.2)', padding: '1.5rem', borderRadius: '16px', marginTop: '1rem' }}>
+            <div className="controls-grid" style={{ background: 'rgba(0,0,0,0.2)', padding: '1.2rem', borderRadius: '16px', marginTop: 0 }}>
               <div className="control-group">
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
                   <label>Водяной знак</label>
@@ -567,7 +570,7 @@ function App() {
               )}
             </div>
 
-            <div style={{ marginTop: '2.5rem', display: 'flex', gap: '1.5rem', justifyContent: 'center' }}>
+            <div style={{ marginTop: '1.5rem', display: 'flex', gap: '1.5rem', justifyContent: 'center' }}>
               <button 
                 className="btn btn-primary" 
                 onClick={trim} 
@@ -595,11 +598,8 @@ function App() {
               </button>
             </div>
 
-          </div>
-        )}
-        
-        <div className="log-panel" style={{ marginTop: '3rem' }}>
-          <div style={{ marginBottom: '0.8rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div className="log-panel" style={{ marginTop: 'auto' }}>
+              <div style={{ marginBottom: '0.8rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--text-secondary)' }}>Консоль FFmpeg</span>
             <span className="status-badge" style={{ 
               background: loaded ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
@@ -619,7 +619,10 @@ function App() {
             ))}
           </div>
         </div>
-      </main>
+
+      </div>
+    )}
+  </main>
 
       <footer style={{ marginTop: '4rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
         <p>&copy; 2024 Bimba Video Cutter. Все вычисления происходят на вашем устройстве.</p>
