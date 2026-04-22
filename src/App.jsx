@@ -5,6 +5,7 @@ import { fetchFile, toBlobURL } from '@ffmpeg/util'
 function App() {
   const [loaded, setLoaded] = useState(false);
   const ffmpegRef = useRef(new FFmpeg());
+  const videoRef = useRef(null);
   const originalFileHandleRef = useRef(null);
   const videoContainerRef = useRef(null);
   const watermarkImgRef = useRef(null);
