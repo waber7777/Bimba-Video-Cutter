@@ -620,9 +620,10 @@ function App() {
           </div>
         </div>
 
-      </div>
-    )}
-  </main>
+            </div>
+          </div>
+        )}
+      </main>
 
       <footer style={{ marginTop: '4rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
         <p>&copy; 2024 Bimba Video Cutter. Все вычисления происходят на вашем устройстве.</p>
