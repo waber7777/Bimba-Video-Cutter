@@ -5,9 +5,6 @@ import { fetchFile, toBlobURL } from '@ffmpeg/util'
 function App() {
   const [loaded, setLoaded] = useState(false);
   const ffmpegRef = useRef(new FFmpeg());
-  const videoRef = useRef(null);
-  const resultVideoRef = useRef(null);
-  const resultBlobRef = useRef(null);
   const originalFileHandleRef = useRef(null);
   const videoContainerRef = useRef(null);
   const watermarkImgRef = useRef(null);
@@ -29,8 +26,6 @@ function App() {
   const [processing, setProcessing] = useState(false);
   const [logs, setLogs] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
-  const [resultUrl, setResultUrl] = useState(null);
-  const [resultFileName, setResultFileName] = useState('');
 
   const load = async () => {
     const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm'
@@ -76,8 +71,6 @@ function App() {
   const processFile = (file, fileHandle) => {
     if (file && file.type.startsWith('video/')) {
       setVideoFile(file);
-      setResultUrl(null);
-      setResultFileName('');
       originalFileHandleRef.current = fileHandle || null;
       if (videoUrl) URL.revokeObjectURL(videoUrl);
       setVideoUrl(URL.createObjectURL(file));
@@ -233,7 +226,6 @@ function App() {
   const trim = async () => {
     if (!videoFile) return;
     setProcessing(true);
-    setResultUrl(null);
     setLogs(prev => [...prev, '--- Начало обработки ---']);
     
     try {
@@ -321,16 +313,12 @@ function App() {
 
       setLogs(prev => [...prev, `Результат: ${(data.length / 1024 / 1024).toFixed(2)} MB`]);
 
-      // Создаём blob и URL для предпросмотра
-      if (resultUrl) URL.revokeObjectURL(resultUrl);
+      // Создаём blob
       const blob = new Blob([data], { type: 'video/mp4' });
-      resultBlobRef.current = blob;
-      const url = URL.createObjectURL(blob);
       const safeName = `cut_${sanitizeFileName(videoFile.name)}.mp4`;
       
-      setResultUrl(url);
-      setResultFileName(safeName);
-      setLogs(prev => [...prev, `Готово! Предпросмотр доступен ниже. Нажмите "Скачать".`]);
+      setLogs(prev => [...prev, `Сохранение файла...`]);
+      await saveFileDirectly(blob, safeName);
     } catch (err) {
       console.error(err);
       setLogs(prev => [...prev, 'ОШИБКА: ' + err.message]);
@@ -339,15 +327,12 @@ function App() {
     }
   }
 
-  const downloadResult = async () => {
-    const blob = resultBlobRef.current;
-    if (!blob) return;
-
+  const saveFileDirectly = async (blob, fileName) => {
     if (window.showSaveFilePicker) {
       try {
         // Если есть handle исходного файла, открываем диалог в той же папке
         const opts = {
-          suggestedName: resultFileName,
+          suggestedName: fileName,
           types: [{
             description: 'MP4 Видео',
             accept: { 'video/mp4': ['.mp4'] }
@@ -363,7 +348,10 @@ function App() {
         setLogs(prev => [...prev, '✅ Файл успешно сохранён!']);
         return;
       } catch (err) {
-        if (err.name === 'AbortError') return;
+        if (err.name === 'AbortError') {
+          setLogs(prev => [...prev, 'Сохранение отменено.']);
+          return;
+        }
         console.warn('showSaveFilePicker failed', err);
       }
     }
@@ -373,10 +361,11 @@ function App() {
     reader.onload = () => {
       const a = document.createElement('a');
       a.href = reader.result;
-      a.download = resultFileName;
+      a.download = fileName;
       document.body.appendChild(a);
       a.click();
       setTimeout(() => document.body.removeChild(a), 200);
+      setLogs(prev => [...prev, '✅ Файл успешно сохранён!']);
     };
     reader.readAsDataURL(blob);
   }
@@ -600,37 +589,11 @@ function App() {
                   </>
                 )}
               </button>
-              <button className="btn" onClick={() => { setVideoFile(null); setResultUrl(null); }} disabled={processing} style={{ background: 'rgba(255,255,255,0.05)', color: '#fff' }}>
+              <button className="btn" onClick={() => { setVideoFile(null); }} disabled={processing} style={{ background: 'rgba(255,255,255,0.05)', color: '#fff' }}>
                 Другое видео
               </button>
             </div>
 
-            {/* Блок предпросмотра результата */}
-            {resultUrl && (
-              <div style={{ marginTop: '2.5rem', padding: '1.5rem', background: 'rgba(16, 185, 129, 0.05)', border: '1px solid rgba(16, 185, 129, 0.2)', borderRadius: '16px' }}>
-                <p style={{ color: '#10b981', fontWeight: '600', marginBottom: '1rem', fontSize: '1rem' }}>
-                  ✅ Видео обрезано! Проверьте результат:
-                </p>
-                <video
-                  ref={resultVideoRef}
-                  src={resultUrl}
-                  controls
-                  style={{ width: '100%', borderRadius: '12px', marginBottom: '1rem', maxHeight: '400px' }}
-                />
-                <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
-                  <button 
-                    className="btn" 
-                    onClick={downloadResult}
-                    style={{ background: '#10b981', color: '#fff', fontWeight: '700' }}
-                  >
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: '8px' }}>
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
-                    </svg>
-                    💾 Сохранить как...
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
         )}
         
