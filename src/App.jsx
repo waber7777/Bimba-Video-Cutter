@@ -6,20 +6,38 @@ function App() {
   const [loaded, setLoaded] = useState(false);
   const ffmpegRef = useRef(new FFmpeg());
   const videoRef = useRef(null);
+  const resultVideoRef = useRef(null);
+  const resultBlobRef = useRef(null);
+  const originalFileHandleRef = useRef(null);
+  const videoContainerRef = useRef(null);
+  const watermarkImgRef = useRef(null);
   const [videoFile, setVideoFile] = useState(null);
   const [videoUrl, setVideoUrl] = useState('');
   const [startTime, setStartTime] = useState(0);
   const [endTime, setEndTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
+  
+  // Watermark states
+  const [watermarkFile, setWatermarkFile] = useState(null);
+  const [watermarkUrl, setWatermarkUrl] = useState('');
+  const [watermarkPos, setWatermarkPos] = useState({ x: 10, y: 10 });
+  const [watermarkOpacity, setWatermarkOpacity] = useState(1.0);
+  const [watermarkScale, setWatermarkScale] = useState(30);
+  const [isDraggingWatermark, setIsDraggingWatermark] = useState(false);
+
   const [processing, setProcessing] = useState(false);
   const [logs, setLogs] = useState([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const [resultUrl, setResultUrl] = useState(null);
+  const [resultFileName, setResultFileName] = useState('');
 
   const load = async () => {
     const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm'
     const ffmpeg = ffmpegRef.current;
     
     ffmpeg.on('log', ({ message }) => {
-      setLogs(prev => [...prev.slice(-5), message]);
+      setLogs(prev => [...prev.slice(-50), message]);
       console.log(message);
     });
 
@@ -29,6 +47,7 @@ function App() {
         wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
       });
       setLoaded(true);
+      setLogs(prev => [...prev, 'FFmpeg загружен и готов к работе.']);
     } catch (err) {
       console.error('Failed to load ffmpeg', err);
       setLogs(prev => [...prev, 'Ошибка загрузки FFmpeg: ' + err.message]);
@@ -37,17 +56,155 @@ function App() {
 
   useEffect(() => {
     load();
+
+    const preventDefault = (e) => e.preventDefault();
+    window.addEventListener('dragover', preventDefault);
+    window.addEventListener('drop', preventDefault);
+
+    return () => {
+      window.removeEventListener('dragover', preventDefault);
+      window.removeEventListener('drop', preventDefault);
+    };
   }, []);
 
-  const handleFileChange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.playbackRate = playbackSpeed;
+    }
+  }, [playbackSpeed]);
+
+  const processFile = (file, fileHandle) => {
+    if (file && file.type.startsWith('video/')) {
       setVideoFile(file);
+      setResultUrl(null);
+      setResultFileName('');
+      originalFileHandleRef.current = fileHandle || null;
       if (videoUrl) URL.revokeObjectURL(videoUrl);
       setVideoUrl(URL.createObjectURL(file));
-      setLogs(prev => [...prev, `Файл выбран: ${file.name}`]);
+      setLogs(prev => [...prev, `Файл выбран: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`]);
+    } else if (file) {
+      setLogs(prev => [...prev, `Ошибка: Пожалуйста, выберите видео файл.`]);
     }
-  }
+  };
+
+  // Выбор файла через File System Access API (запоминает папку)
+  const openFilePicker = async () => {
+    if (window.showOpenFilePicker) {
+      try {
+        const [handle] = await window.showOpenFilePicker({
+          types: [{
+            description: 'Видео файлы',
+            accept: { 'video/*': ['.mp4', '.mov', '.mkv', '.avi', '.webm', '.wmv'] }
+          }]
+        });
+        const file = await handle.getFile();
+        processFile(file, handle);
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          console.error(err);
+          setLogs(prev => [...prev, 'Ошибка открытия файла: ' + err.message]);
+        }
+      }
+    } else {
+      // Фоллбэк: старый input
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'video/*';
+      input.onchange = (e) => processFile(e.target.files[0], null);
+      input.click();
+    }
+  };
+
+  const processWatermark = (file) => {
+    if (file && file.type.startsWith('image/')) {
+      setWatermarkFile(file);
+      if (watermarkUrl) URL.revokeObjectURL(watermarkUrl);
+      setWatermarkUrl(URL.createObjectURL(file));
+      setLogs(prev => [...prev, `Водяной знак выбран: ${file.name}`]);
+    } else if (file) {
+      setLogs(prev => [...prev, `Ошибка: Выберите картинку (PNG, JPG и т.д.).`]);
+    }
+  };
+
+  const openWatermarkPicker = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = (e) => processWatermark(e.target.files[0]);
+    input.click();
+  };
+
+  const handleFileChange = (e) => {
+    processFile(e.target.files[0], null);
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      // ВАЖНО: сохраняем файл ДО любого await, т.к. браузер очищает dataTransfer
+      const file = e.dataTransfer.files[0];
+      
+      // Пытаемся получить file handle для запоминания папки
+      let fileHandle = null;
+      if (e.dataTransfer.items && e.dataTransfer.items[0]?.getAsFileSystemHandle) {
+        try {
+          fileHandle = await e.dataTransfer.items[0].getAsFileSystemHandle();
+        } catch (_) { /* ignore */ }
+      }
+      processFile(file, fileHandle);
+    }
+  };
+
+  // Watermark dragging logic
+  const handleWatermarkMouseDown = (e) => {
+    e.preventDefault();
+    setIsDraggingWatermark(true);
+  };
+
+  const handleWatermarkMouseMove = (e) => {
+    if (!isDraggingWatermark || !videoContainerRef.current) return;
+    const rect = videoContainerRef.current.getBoundingClientRect();
+    let x = ((e.clientX - rect.left) / rect.width) * 100;
+    let y = ((e.clientY - rect.top) / rect.height) * 100;
+    
+    x = Math.max(0, Math.min(100, x));
+    y = Math.max(0, Math.min(100, y));
+    
+    setWatermarkPos({ x, y });
+  };
+
+  const handleWatermarkMouseUp = () => {
+    setIsDraggingWatermark(false);
+  };
+
+  useEffect(() => {
+    if (isDraggingWatermark) {
+      window.addEventListener('mousemove', handleWatermarkMouseMove);
+      window.addEventListener('mouseup', handleWatermarkMouseUp);
+    } else {
+      window.removeEventListener('mousemove', handleWatermarkMouseMove);
+      window.removeEventListener('mouseup', handleWatermarkMouseUp);
+    }
+    return () => {
+      window.removeEventListener('mousemove', handleWatermarkMouseMove);
+      window.removeEventListener('mouseup', handleWatermarkMouseUp);
+    };
+  }, [isDraggingWatermark]);
 
   const onVideoLoad = () => {
     const dur = videoRef.current.duration;
@@ -56,43 +213,172 @@ function App() {
     setStartTime(0);
   }
 
+  const handleTimeUpdate = () => {
+    if (!videoRef.current) return;
+    const current = videoRef.current.currentTime;
+    // Зацикливаем: если вышли за пределы endTime, возвращаемся к startTime
+    if (current >= endTime && endTime > 0) {
+      videoRef.current.currentTime = startTime;
+      videoRef.current.play().catch(e => console.log('Autoplay prevented', e));
+    }
+  };
+
+  // Sanitize filename: remove non-ASCII, replace spaces
+  const sanitizeFileName = (name) => {
+    const base = name.replace(/\.[^/.]+$/, ''); // убираем расширение
+    const clean = base.replace(/[^\w\d-_.]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+    return clean || 'video';
+  };
+
   const trim = async () => {
     if (!videoFile) return;
     setProcessing(true);
-    setLogs(prev => [...prev, 'Начало обработки...']);
+    setResultUrl(null);
+    setLogs(prev => [...prev, '--- Начало обработки ---']);
     
     try {
       const ffmpeg = ffmpegRef.current;
       const inputName = 'input.mp4';
       const outputName = 'output.mp4';
 
-      await ffmpeg.writeFile(inputName, await fetchFile(videoFile));
+      setLogs(prev => [...prev, `Чтение файла в память (${(videoFile.size / 1024 / 1024).toFixed(1)} MB)...`]);
+      const fileData = await fetchFile(videoFile);
+      await ffmpeg.writeFile(inputName, fileData);
 
-      // Команда для обрезки
-      // Используем -ss перед -i для быстрого поиска (но менее точно) или после -i для точности.
-      // Здесь используем -ss до -i и -to после для баланса скорости.
-      await ffmpeg.exec([
+      setLogs(prev => [...prev, `Обрезка: ${startTime.toFixed(2)}с → ${endTime.toFixed(2)}с (скорость: ${playbackSpeed}x)...`]);
+
+      const args = [
+        '-i', inputName
+      ];
+
+      if (watermarkFile) {
+        setLogs(prev => [...prev, `Подготовка водяного знака...`]);
+        const wmExt = watermarkFile.name.split('.').pop() || 'png';
+        const wmName = `watermark.${wmExt}`;
+        const wmFileData = await fetchFile(watermarkFile);
+        await ffmpeg.writeFile(wmName, wmFileData);
+        args.push('-i', wmName);
+      }
+
+      args.push(
         '-ss', startTime.toFixed(2),
-        '-i', inputName,
-        '-to', (endTime - startTime).toFixed(2),
-        '-c', 'copy',
-        outputName
-      ]);
+        '-to', endTime.toFixed(2),
+        '-avoid_negative_ts', 'make_zero'
+      );
+
+      // Применяем фильтры в зависимости от наличия ватермарки
+      if (watermarkFile) {
+        let finalWmWidth = -1;
+        if (watermarkImgRef.current && videoRef.current) {
+           const actualVideoWidth = videoRef.current.videoWidth;
+           const vidRect = videoRef.current.getBoundingClientRect();
+           const wmRect = watermarkImgRef.current.getBoundingClientRect();
+           const scaleW = wmRect.width / vidRect.width;
+           finalWmWidth = Math.round(actualVideoWidth * scaleW);
+           // Убеждаемся, что ширина четная (иногда FFmpeg требует этого для scale)
+           if (finalWmWidth % 2 !== 0) finalWmWidth += 1;
+        }
+
+        let vFilter = `[1:v]scale=${finalWmWidth > 0 ? finalWmWidth : 'iw'}:-1,format=rgba,colorchannelmixer=aa=${watermarkOpacity.toFixed(2)}[wm];`;
+        
+        if (playbackSpeed !== 1.0) {
+          vFilter += `[0:v]setpts=${(1 / playbackSpeed).toFixed(4)}*PTS[vspeed];`;
+          vFilter += `[vspeed][wm]overlay=x=(main_w-overlay_w)*${(watermarkPos.x / 100).toFixed(4)}:y=(main_h-overlay_h)*${(watermarkPos.y / 100).toFixed(4)}[vout]`;
+        } else {
+          vFilter += `[0:v][wm]overlay=x=(main_w-overlay_w)*${(watermarkPos.x / 100).toFixed(4)}:y=(main_h-overlay_h)*${(watermarkPos.y / 100).toFixed(4)}[vout]`;
+        }
+        args.push('-filter_complex', vFilter);
+        args.push('-map', '[vout]', '-map', '0:a?');
+        
+        if (playbackSpeed !== 1.0) {
+          args.push('-filter:a', `atempo=${playbackSpeed.toFixed(2)}`);
+        }
+      } else {
+        if (playbackSpeed !== 1.0) {
+          args.push(
+            '-vf', `setpts=${(1 / playbackSpeed).toFixed(4)}*PTS`,
+            '-af', `atempo=${playbackSpeed.toFixed(2)}`
+          );
+        } else {
+          args.push('-map', '0'); // Если без фильтров, переносим все потоки (субтитры и т.д.)
+        }
+      }
+      
+      args.push(outputName);
+
+      // Полное перекодирование
+      const ret = await ffmpeg.exec(args);
+      
+      if (ret !== 0) {
+        throw new Error(`FFmpeg завершился с ошибкой (код ${ret}). Проверьте логи выше.`);
+      }
 
       const data = await ffmpeg.readFile(outputName);
-      const url = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
       
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `cut_${videoFile.name}`;
-      a.click();
+      if (!data || data.length === 0) {
+        throw new Error('Получен пустой файл. Попробуйте изменить интервал обрезки.');
+      }
+
+      setLogs(prev => [...prev, `Результат: ${(data.length / 1024 / 1024).toFixed(2)} MB`]);
+
+      // Создаём blob и URL для предпросмотра
+      if (resultUrl) URL.revokeObjectURL(resultUrl);
+      const blob = new Blob([data], { type: 'video/mp4' });
+      resultBlobRef.current = blob;
+      const url = URL.createObjectURL(blob);
+      const safeName = `cut_${sanitizeFileName(videoFile.name)}.mp4`;
       
-      setLogs(prev => [...prev, 'Успешно завершено!']);
+      setResultUrl(url);
+      setResultFileName(safeName);
+      setLogs(prev => [...prev, `Готово! Предпросмотр доступен ниже. Нажмите "Скачать".`]);
     } catch (err) {
-      setLogs(prev => [...prev, 'Ошибка при обработке: ' + err.message]);
+      console.error(err);
+      setLogs(prev => [...prev, 'ОШИБКА: ' + err.message]);
     } finally {
       setProcessing(false);
     }
+  }
+
+  const downloadResult = async () => {
+    const blob = resultBlobRef.current;
+    if (!blob) return;
+
+    if (window.showSaveFilePicker) {
+      try {
+        // Если есть handle исходного файла, открываем диалог в той же папке
+        const opts = {
+          suggestedName: resultFileName,
+          types: [{
+            description: 'MP4 Видео',
+            accept: { 'video/mp4': ['.mp4'] }
+          }]
+        };
+        if (originalFileHandleRef.current) {
+          opts.startIn = originalFileHandleRef.current;
+        }
+        const handle = await window.showSaveFilePicker(opts);
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        setLogs(prev => [...prev, '✅ Файл успешно сохранён!']);
+        return;
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        console.warn('showSaveFilePicker failed', err);
+      }
+    }
+
+    // Фоллбэк
+    const reader = new FileReader();
+    reader.onload = () => {
+      const a = document.createElement('a');
+      a.href = reader.result;
+      a.download = resultFileName;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => document.body.removeChild(a), 200);
+    };
+    reader.readAsDataURL(blob);
   }
 
   return (
@@ -104,7 +390,18 @@ function App() {
 
       <main className="glass" style={{ padding: '2.5rem', maxWidth: '900px', margin: '0 auto' }}>
         {!videoFile ? (
-          <label className="upload-zone">
+          <div 
+            className="upload-zone"
+            style={{ 
+              borderColor: isDragging ? 'var(--accent-color)' : 'var(--border-color)',
+              background: isDragging ? 'rgba(139, 92, 246, 0.1)' : 'transparent'
+            }}
+            onClick={openFilePicker}
+            onDragOver={handleDragOver}
+            onDragEnter={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
             <div style={{ background: 'rgba(139, 92, 246, 0.1)', padding: '2rem', borderRadius: '50%', marginBottom: '1rem' }}>
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
@@ -112,18 +409,62 @@ function App() {
             </div>
             <span style={{ fontSize: '1.2rem', fontWeight: '500' }}>Перетащите видео или нажмите для выбора</span>
             <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Поддерживаются MP4, MOV, MKV и др.</span>
-            <input type="file" hidden accept="video/*" onChange={handleFileChange} />
-          </label>
+          </div>
         ) : (
           <div className="editor-layout">
-            <video 
-              ref={videoRef}
-              src={videoUrl} 
-              className="video-preview" 
-              controls 
-              onLoadedMetadata={onVideoLoad}
-              style={{ width: '100%', borderRadius: '12px' }}
-            />
+            <div 
+              style={{ 
+                position: 'relative', 
+                display: 'flex', 
+                justifyContent: 'center',
+                marginBottom: '2rem'
+              }}
+            >
+              <div 
+                ref={videoContainerRef}
+                style={{ 
+                  position: 'relative', 
+                  borderRadius: '16px', 
+                  overflow: 'hidden', 
+                  background: '#000',
+                  boxShadow: '0 4px 20px rgba(0, 0, 0, 0.5)',
+                  display: 'inline-block'
+                }}
+              >
+                <video 
+                  ref={videoRef}
+                  src={videoUrl} 
+                  controls 
+                  autoPlay
+                  onLoadedMetadata={onVideoLoad}
+                  onTimeUpdate={handleTimeUpdate}
+                  style={{ maxWidth: '100%', maxHeight: '60vh', display: 'block' }}
+                />
+                {watermarkUrl && (
+                  <img 
+                    ref={watermarkImgRef}
+                    src={watermarkUrl} 
+                    alt="Watermark" 
+
+                  style={{
+                    position: 'absolute',
+                    left: `${watermarkPos.x}%`,
+                    top: `${watermarkPos.y}%`,
+                    transform: 'translate(-50%, -50%)',
+                    opacity: watermarkOpacity,
+                    width: `${watermarkScale}%`, 
+                    height: 'auto',
+                    cursor: isDraggingWatermark ? 'grabbing' : 'grab',
+                    pointerEvents: 'auto',
+                    zIndex: 10,
+                    userSelect: 'none'
+                  }}
+                  onMouseDown={handleWatermarkMouseDown}
+                  draggable="false"
+                />
+              )}
+              </div>
+            </div>
             
             <div className="controls-grid" style={{ background: 'rgba(0,0,0,0.2)', padding: '1.5rem', borderRadius: '16px' }}>
               <div className="control-group">
@@ -137,7 +478,11 @@ function App() {
                   max={duration} 
                   step="0.01" 
                   value={startTime}
-                  onChange={(e) => setStartTime(Math.min(parseFloat(e.target.value), endTime - 0.1))}
+                  onChange={(e) => {
+                    const val = Math.min(parseFloat(e.target.value), endTime - 0.1);
+                    setStartTime(val);
+                    if (videoRef.current) videoRef.current.currentTime = val;
+                  }}
                 />
               </div>
               
@@ -152,9 +497,84 @@ function App() {
                   max={duration} 
                   step="0.01" 
                   value={endTime}
-                  onChange={(e) => setEndTime(Math.max(parseFloat(e.target.value), startTime + 0.1))}
+                  onChange={(e) => {
+                    const val = Math.max(parseFloat(e.target.value), startTime + 0.1);
+                    setEndTime(val);
+                    // При изменении конца показываем кадр конца
+                    if (videoRef.current) videoRef.current.currentTime = val;
+                  }}
                 />
               </div>
+              
+              <div className="control-group">
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                  <label>Скорость воспроизведения</label>
+                  <span style={{ color: 'var(--accent-color)', fontWeight: '700' }}>{playbackSpeed.toFixed(1)}x</span>
+                </div>
+                <input 
+                  type="range" 
+                  min="0.5" 
+                  max="10.0" 
+                  step="0.1" 
+                  value={playbackSpeed}
+                  onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}
+                />
+              </div>
+            </div>
+
+            <div className="controls-grid" style={{ background: 'rgba(0,0,0,0.2)', padding: '1.5rem', borderRadius: '16px', marginTop: '1rem' }}>
+              <div className="control-group">
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                  <label>Водяной знак</label>
+                  {watermarkFile && (
+                    <span 
+                      style={{ color: '#ef4444', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}
+                      onClick={() => { setWatermarkFile(null); setWatermarkUrl(''); }}
+                    >
+                      Удалить
+                    </span>
+                  )}
+                </div>
+                <button className="btn" onClick={openWatermarkPicker} style={{ background: 'rgba(255,255,255,0.05)', color: '#fff', width: '100%' }}>
+                  {watermarkFile ? 'Заменить картинку' : '+ Загрузить логотип'}
+                </button>
+              </div>
+
+              {watermarkFile && (
+                <>
+                  <div className="control-group" style={{ marginBottom: '1rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                      <label>Прозрачность</label>
+                      <span style={{ color: 'var(--accent-color)', fontWeight: '700' }}>{Math.round(watermarkOpacity * 100)}%</span>
+                    </div>
+                    <input 
+                      type="range" 
+                      min="0.1" 
+                      max="1.0" 
+                      step="0.05" 
+                      value={watermarkOpacity}
+                      onChange={(e) => setWatermarkOpacity(parseFloat(e.target.value))}
+                    />
+                  </div>
+                  <div className="control-group">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                      <label>Размер</label>
+                      <span style={{ color: 'var(--accent-color)', fontWeight: '700' }}>{watermarkScale}%</span>
+                    </div>
+                    <input 
+                      type="range" 
+                      min="5" 
+                      max="100" 
+                      step="1" 
+                      value={watermarkScale}
+                      onChange={(e) => setWatermarkScale(parseInt(e.target.value, 10))}
+                    />
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.5rem', textAlign: 'center' }}>
+                      Перетаскивайте логотип прямо на видео
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
 
             <div style={{ marginTop: '2.5rem', display: 'flex', gap: '1.5rem', justifyContent: 'center' }}>
@@ -175,17 +595,42 @@ function App() {
                       <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
                       <line x1="9" y1="3" x2="9" y2="21"/>
                       <line x1="15" y1="3" x2="15" y2="21"/>
-                      <line x1="3" y1="9" x2="21" y2="9"/>
-                      <line x1="3" y1="15" x2="21" y2="15"/>
                     </svg>
-                    Обрезать и скачать
+                    Обрезать
                   </>
                 )}
               </button>
-              <button className="btn" onClick={() => setVideoFile(null)} disabled={processing} style={{ background: 'rgba(255,255,255,0.05)', color: '#fff' }}>
+              <button className="btn" onClick={() => { setVideoFile(null); setResultUrl(null); }} disabled={processing} style={{ background: 'rgba(255,255,255,0.05)', color: '#fff' }}>
                 Другое видео
               </button>
             </div>
+
+            {/* Блок предпросмотра результата */}
+            {resultUrl && (
+              <div style={{ marginTop: '2.5rem', padding: '1.5rem', background: 'rgba(16, 185, 129, 0.05)', border: '1px solid rgba(16, 185, 129, 0.2)', borderRadius: '16px' }}>
+                <p style={{ color: '#10b981', fontWeight: '600', marginBottom: '1rem', fontSize: '1rem' }}>
+                  ✅ Видео обрезано! Проверьте результат:
+                </p>
+                <video
+                  ref={resultVideoRef}
+                  src={resultUrl}
+                  controls
+                  style={{ width: '100%', borderRadius: '12px', marginBottom: '1rem', maxHeight: '400px' }}
+                />
+                <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+                  <button 
+                    className="btn" 
+                    onClick={downloadResult}
+                    style={{ background: '#10b981', color: '#fff', fontWeight: '700' }}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: '8px' }}>
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                    </svg>
+                    💾 Сохранить как...
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
         
