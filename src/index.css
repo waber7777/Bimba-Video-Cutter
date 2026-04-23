@@ -474,6 +474,26 @@ input[type="range"].speed-slider {
   font-variant-numeric: tabular-nums;
 }
 
+/* ─── Time Overlay ─── */
+.time-overlay {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  padding: 0.25rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  z-index: 5;
+  letter-spacing: 0.02em;
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
 /* ─── Filename Input ─── */
 .filename-input {
   flex: 1;

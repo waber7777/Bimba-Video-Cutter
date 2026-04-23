@@ -29,6 +29,7 @@ function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [resultBlob, setResultBlob] = useState(null);
   const [resultFileName, setResultFileName] = useState('');
+  const [currentTime, setCurrentTime] = useState(0);
 
   const load = async () => {
     const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm'
@@ -212,6 +213,7 @@ function App() {
   const handleTimeUpdate = () => {
     if (!videoRef.current) return;
     const current = videoRef.current.currentTime;
+    setCurrentTime(current);
     // Зацикливаем: если вышли за пределы endTime, возвращаемся к startTime
     if (current >= endTime && endTime > 0) {
       videoRef.current.currentTime = startTime;
@@ -463,6 +465,10 @@ function App() {
                 onLoadedMetadata={onVideoLoad}
                 onTimeUpdate={handleTimeUpdate}
               />
+              {/* Time overlay with milliseconds */}
+              <div className="time-overlay">
+                {formatTime(currentTime)} / {formatTime(duration)}
+              </div>
               {watermarkUrl && (
                 <img 
                   ref={watermarkImgRef}
