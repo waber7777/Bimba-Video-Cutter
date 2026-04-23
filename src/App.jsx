@@ -277,11 +277,16 @@ function App() {
 
         let vFilter = `[1:v]scale=${finalWmWidth > 0 ? finalWmWidth : 'iw'}:-1,format=rgba,colorchannelmixer=aa=${watermarkOpacity.toFixed(2)}[wm];`;
         
+        // Формула: центр водяного знака = x% ширины видео (как в CSS с translate(-50%,-50%))
+        // FFmpeg: overlay_x = main_w * (x/100) - overlay_w/2
+        const oxExpr = `main_w*${(watermarkPos.x / 100).toFixed(4)}-overlay_w/2`;
+        const oyExpr = `main_h*${(watermarkPos.y / 100).toFixed(4)}-overlay_h/2`;
+        
         if (playbackSpeed !== 1.0) {
           vFilter += `[0:v]setpts=${(1 / playbackSpeed).toFixed(4)}*PTS[vspeed];`;
-          vFilter += `[vspeed][wm]overlay=x=(main_w-overlay_w)*${(watermarkPos.x / 100).toFixed(4)}:y=(main_h-overlay_h)*${(watermarkPos.y / 100).toFixed(4)}[vout]`;
+          vFilter += `[vspeed][wm]overlay=x=${oxExpr}:y=${oyExpr}[vout]`;
         } else {
-          vFilter += `[0:v][wm]overlay=x=(main_w-overlay_w)*${(watermarkPos.x / 100).toFixed(4)}:y=(main_h-overlay_h)*${(watermarkPos.y / 100).toFixed(4)}[vout]`;
+          vFilter += `[0:v][wm]overlay=x=${oxExpr}:y=${oyExpr}[vout]`;
         }
         args.push('-filter_complex', vFilter);
         args.push('-map', '[vout]', '-map', '0:a?');
