@@ -32,7 +32,6 @@ function App() {
   const [currentTime, setCurrentTime] = useState(0);
 
   const load = async () => {
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm'
     const ffmpeg = ffmpegRef.current;
     
     ffmpeg.on('log', ({ message }) => {
@@ -41,6 +40,7 @@ function App() {
     });
 
     try {
+      const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
       await ffmpeg.load({
         coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
         wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
@@ -233,90 +233,137 @@ function App() {
     setProcessing(true);
     setLogs(prev => [...prev, '--- Начало обработки ---']);
     
+    const filesToCleanup = [];
+    
     try {
       const ffmpeg = ffmpegRef.current;
       const inputName = 'input.mp4';
       const outputName = 'output.mp4';
+      filesToCleanup.push(inputName, outputName);
 
       setLogs(prev => [...prev, `Чтение файла в память (${(videoFile.size / 1024 / 1024).toFixed(1)} MB)...`]);
       const fileData = await fetchFile(videoFile);
       await ffmpeg.writeFile(inputName, fileData);
 
-      setLogs(prev => [...prev, `Обрезка: ${startTime.toFixed(2)}с → ${endTime.toFixed(2)}с (скорость: ${playbackSpeed}x)...`]);
-
       const trimDuration = endTime - startTime;
-
-      // -ss ПЕРЕД -i = быстрый поиск по ключевым кадрам (не декодирует всё с начала!)
-      const args = ['-y'];
-      
-      if (startTime > 0) {
-        args.push('-ss', startTime.toFixed(2));
-      }
-      args.push('-i', inputName);
-
-      if (watermarkFile) {
-        setLogs(prev => [...prev, `Подготовка водяного знака...`]);
-        const wmExt = watermarkFile.name.split('.').pop() || 'png';
-        const wmName = `watermark.${wmExt}`;
-        const wmFileData = await fetchFile(watermarkFile);
-        await ffmpeg.writeFile(wmName, wmFileData);
-        args.push('-i', wmName);
+      if (trimDuration <= 0.05) {
+        throw new Error('Слишком короткий интервал. Увеличьте область обрезки.');
       }
 
-      // -t = длительность фрагмента (т.к. -ss перед -i, время уже сдвинуто)
-      args.push('-t', trimDuration.toFixed(2));
+      const hasWatermark = !!watermarkFile;
+      const hasSpeedChange = playbackSpeed !== 1.0;
+      const needsReencode = hasWatermark || hasSpeedChange;
 
-      // Применяем фильтры в зависимости от наличия ватермарки
-      if (watermarkFile) {
-        let finalWmWidth = -1;
-        if (watermarkImgRef.current && videoRef.current) {
-           const actualVideoWidth = videoRef.current.videoWidth;
-           const vidRect = videoRef.current.getBoundingClientRect();
-           const wmRect = watermarkImgRef.current.getBoundingClientRect();
-           const scaleW = wmRect.width / vidRect.width;
-           finalWmWidth = Math.round(actualVideoWidth * scaleW);
-           if (finalWmWidth % 2 !== 0) finalWmWidth += 1;
+      setLogs(prev => [...prev, `Обрезка: ${startTime.toFixed(2)}с → ${endTime.toFixed(2)}с | Скорость: ${playbackSpeed}x | Водяной знак: ${hasWatermark ? 'да' : 'нет'} | Режим: ${needsReencode ? 'перекодировка' : 'копирование'}`]);
+
+      // ═══════════════════════════════════════════════════════
+      // СЦЕНАРИЙ 1: Без перекодировки (stream copy) — быстро
+      // Условие: нет ватермарки, скорость 1x
+      // ═══════════════════════════════════════════════════════
+      if (!needsReencode) {
+        const args = [
+          '-y',
+          '-ss', startTime.toFixed(3),   // -ss ДО -i = быстрый seek по ключевым кадрам
+          '-i', inputName,
+          '-t', trimDuration.toFixed(3),  // длительность фрагмента
+          '-c', 'copy',                   // без перекодировки
+          '-avoid_negative_ts', 'make_zero',  // корректные таймстампы
+          '-movflags', '+faststart',      // moov atom в начале для стриминга
+          outputName
+        ];
+
+        setLogs(prev => [...prev, `ffmpeg ${args.join(' ')}`]);
+        const ret = await ffmpeg.exec(args);
+        if (ret !== 0) throw new Error(`FFmpeg ошибка (код ${ret})`);
+      }
+      // ═══════════════════════════════════════════════════════
+      // СЦЕНАРИЙ 2: Перекодировка (с ватермаркой и/или скоростью)
+      // ═══════════════════════════════════════════════════════
+      else {
+        // Подготовка водяного знака
+        let wmName = null;
+        if (hasWatermark) {
+          const wmExt = watermarkFile.name.split('.').pop() || 'png';
+          wmName = `watermark.${wmExt}`;
+          const wmFileData = await fetchFile(watermarkFile);
+          await ffmpeg.writeFile(wmName, wmFileData);
+          filesToCleanup.push(wmName);
+          setLogs(prev => [...prev, 'Водяной знак загружен.']);
         }
 
-        let vFilter = `[1:v]scale=${finalWmWidth > 0 ? finalWmWidth : 'iw'}:-1,format=rgba,colorchannelmixer=aa=${watermarkOpacity.toFixed(2)}[wm];`;
-        
-        const oxExpr = `main_w*${(watermarkPos.x / 100).toFixed(4)}-overlay_w/2`;
-        const oyExpr = `main_h*${(watermarkPos.y / 100).toFixed(4)}-overlay_h/2`;
-        
-        if (playbackSpeed !== 1.0) {
-          vFilter += `[0:v]setpts=${(1 / playbackSpeed).toFixed(4)}*PTS[vspeed];`;
-          vFilter += `[vspeed][wm]overlay=x=${oxExpr}:y=${oyExpr}:shortest=1[vout]`;
+        // Собираем аргументы
+        const args = ['-y'];
+
+        // -ss ДО -i для быстрого поиска (сбрасывает таймстампы в 0)
+        args.push('-ss', startTime.toFixed(3));
+        args.push('-i', inputName);
+
+        // Водяной знак как второй вход
+        if (hasWatermark) {
+          args.push('-i', wmName);
+        }
+
+        // Длительность выходного фрагмента
+        args.push('-t', trimDuration.toFixed(3));
+
+        // ── Построение фильтров ──
+        if (hasWatermark) {
+          // Вычисляем размер ватермарки в пикселях видео
+          let finalWmWidth = -1;
+          if (watermarkImgRef.current && videoRef.current) {
+            const actualVideoWidth = videoRef.current.videoWidth;
+            const vidRect = videoRef.current.getBoundingClientRect();
+            const wmRect = watermarkImgRef.current.getBoundingClientRect();
+            const scaleW = wmRect.width / vidRect.width;
+            finalWmWidth = Math.round(actualVideoWidth * scaleW);
+            if (finalWmWidth % 2 !== 0) finalWmWidth += 1;
+          }
+
+          const wmScale = finalWmWidth > 0 ? finalWmWidth : 'iw';
+          const oxExpr = `main_w*${(watermarkPos.x / 100).toFixed(4)}-overlay_w/2`;
+          const oyExpr = `main_h*${(watermarkPos.y / 100).toFixed(4)}-overlay_h/2`;
+
+          let vFilter = `[1:v]scale=${wmScale}:-1,format=rgba,colorchannelmixer=aa=${watermarkOpacity.toFixed(2)}[wm];`;
+
+          if (hasSpeedChange) {
+            // Ватермарка + изменение скорости
+            vFilter += `[0:v]setpts=${(1 / playbackSpeed).toFixed(4)}*PTS[vspeed];`;
+            vFilter += `[vspeed][wm]overlay=x=${oxExpr}:y=${oyExpr}:eof_action=repeat[vout]`;
+          } else {
+            // Только ватермарка
+            vFilter += `[0:v][wm]overlay=x=${oxExpr}:y=${oyExpr}:eof_action=repeat[vout]`;
+          }
+
+          args.push('-filter_complex', vFilter);
+          args.push('-map', '[vout]');
+          args.push('-map', '0:a?');
+
+          if (hasSpeedChange) {
+            args.push('-af', `atempo=${playbackSpeed.toFixed(2)}`);
+          }
         } else {
-          vFilter += `[0:v][wm]overlay=x=${oxExpr}:y=${oyExpr}:shortest=1[vout]`;
-        }
-        args.push('-filter_complex', vFilter);
-        args.push('-map', '[vout]', '-map', '0:a?');
-        
-        if (playbackSpeed !== 1.0) {
+          // Только изменение скорости, без ватермарки
+          args.push('-vf', `setpts=${(1 / playbackSpeed).toFixed(4)}*PTS`);
           args.push('-af', `atempo=${playbackSpeed.toFixed(2)}`);
         }
-      } else {
-        if (playbackSpeed !== 1.0) {
-          args.push(
-            '-vf', `setpts=${(1 / playbackSpeed).toFixed(4)}*PTS`,
-            '-af', `atempo=${playbackSpeed.toFixed(2)}`
-          );
-        } else {
-          args.push('-c', 'copy');
-        }
-      }
-      
-      args.push(outputName);
 
-      // Логируем команду для отладки
-      setLogs(prev => [...prev, `FFmpeg команда: ffmpeg ${args.join(' ')}`]);
-      
-      const ret = await ffmpeg.exec(args);
-      
-      if (ret !== 0) {
-        throw new Error(`FFmpeg завершился с ошибкой (код ${ret}). Проверьте логи выше.`);
+        // Кодек — качественный, совместимый
+        args.push('-c:v', 'libx264');
+        args.push('-preset', 'ultrafast');
+        args.push('-crf', '23');
+        args.push('-c:a', 'aac');
+        args.push('-b:a', '128k');
+        args.push('-movflags', '+faststart');
+        args.push(outputName);
+
+        setLogs(prev => [...prev, `ffmpeg ${args.join(' ')}`]);
+        const ret = await ffmpeg.exec(args);
+        if (ret !== 0) throw new Error(`FFmpeg ошибка (код ${ret})`);
       }
 
+      // ═══════════════════════════════════════════════════════
+      // Чтение результата
+      // ═══════════════════════════════════════════════════════
       let data;
       try {
         data = await ffmpeg.readFile(outputName);
@@ -331,24 +378,22 @@ function App() {
       const sizeInMB = (data.byteLength / 1024 / 1024).toFixed(2);
       setLogs(prev => [...prev, `✅ Обработка завершена! Размер: ${sizeInMB} MB`]);
 
-      // Создаём blob — сохраняем в state, чтобы пользователь скачал по клику
       const blob = new Blob([data.buffer], { type: 'video/mp4' });
       const safeName = `cut_${sanitizeFileName(videoFile.name)}.mp4`;
       
       setResultBlob(blob);
       setResultFileName(safeName);
       setLogs(prev => [...prev, '⬇️ Нажмите кнопку "Скачать" для сохранения файла.']);
-      
-      // Очищаем файлы из виртуальной FS FFmpeg
-      try {
-        await ffmpeg.deleteFile(inputName);
-        await ffmpeg.deleteFile(outputName);
-      } catch (_) { /* игнорируем ошибки очистки */ }
     } catch (err) {
       console.error('Trim error:', err);
       setLogs(prev => [...prev, 'ОШИБКА: ' + err.message]);
     } finally {
       setProcessing(false);
+      // Очистка виртуальной FS FFmpeg
+      const ffmpeg = ffmpegRef.current;
+      for (const f of filesToCleanup) {
+        try { await ffmpeg.deleteFile(f); } catch (_) {}
+      }
     }
   }
 
