@@ -242,10 +242,15 @@ function App() {
 
       setLogs(prev => [...prev, `Обрезка: ${startTime.toFixed(2)}с → ${endTime.toFixed(2)}с (скорость: ${playbackSpeed}x)...`]);
 
-      const args = [
-        '-y',
-        '-i', inputName
-      ];
+      const trimDuration = endTime - startTime;
+
+      // -ss ПЕРЕД -i = быстрый поиск по ключевым кадрам (не декодирует всё с начала!)
+      const args = ['-y'];
+      
+      if (startTime > 0) {
+        args.push('-ss', startTime.toFixed(2));
+      }
+      args.push('-i', inputName);
 
       if (watermarkFile) {
         setLogs(prev => [...prev, `Подготовка водяного знака...`]);
@@ -256,11 +261,8 @@ function App() {
         args.push('-i', wmName);
       }
 
-      args.push(
-        '-ss', startTime.toFixed(2),
-        '-to', endTime.toFixed(2),
-        '-avoid_negative_ts', 'make_zero'
-      );
+      // -t = длительность фрагмента (т.к. -ss перед -i, время уже сдвинуто)
+      args.push('-t', trimDuration.toFixed(2));
 
       // Применяем фильтры в зависимости от наличия ватермарки
       if (watermarkFile) {
@@ -271,22 +273,19 @@ function App() {
            const wmRect = watermarkImgRef.current.getBoundingClientRect();
            const scaleW = wmRect.width / vidRect.width;
            finalWmWidth = Math.round(actualVideoWidth * scaleW);
-           // Убеждаемся, что ширина четная (иногда FFmpeg требует этого для scale)
            if (finalWmWidth % 2 !== 0) finalWmWidth += 1;
         }
 
         let vFilter = `[1:v]scale=${finalWmWidth > 0 ? finalWmWidth : 'iw'}:-1,format=rgba,colorchannelmixer=aa=${watermarkOpacity.toFixed(2)}[wm];`;
         
-        // Формула: центр водяного знака = x% ширины видео (как в CSS с translate(-50%,-50%))
-        // FFmpeg: overlay_x = main_w * (x/100) - overlay_w/2
         const oxExpr = `main_w*${(watermarkPos.x / 100).toFixed(4)}-overlay_w/2`;
         const oyExpr = `main_h*${(watermarkPos.y / 100).toFixed(4)}-overlay_h/2`;
         
         if (playbackSpeed !== 1.0) {
           vFilter += `[0:v]setpts=${(1 / playbackSpeed).toFixed(4)}*PTS[vspeed];`;
-          vFilter += `[vspeed][wm]overlay=x=${oxExpr}:y=${oyExpr}[vout]`;
+          vFilter += `[vspeed][wm]overlay=x=${oxExpr}:y=${oyExpr}:shortest=1[vout]`;
         } else {
-          vFilter += `[0:v][wm]overlay=x=${oxExpr}:y=${oyExpr}[vout]`;
+          vFilter += `[0:v][wm]overlay=x=${oxExpr}:y=${oyExpr}:shortest=1[vout]`;
         }
         args.push('-filter_complex', vFilter);
         args.push('-map', '[vout]', '-map', '0:a?');
