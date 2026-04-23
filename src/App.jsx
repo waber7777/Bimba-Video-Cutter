@@ -593,11 +593,23 @@ function App() {
             </div>
 
             {/* Action Buttons */}
-            <div className="btn-actions">
+            <div className="btn-actions" style={{ flexDirection: resultBlob ? 'column' : 'row', gap: resultBlob ? '0.4rem' : '0.5rem' }}>
               {resultBlob ? (
-                <button className="btn btn-download pulse-anim" onClick={handleDownload}>
-                  ⬇ Скачать видео
-                </button>
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', width: '100%' }}>
+                    <input 
+                      type="text"
+                      className="filename-input"
+                      value={resultFileName.replace(/\.mp4$/i, '')}
+                      onChange={(e) => setResultFileName(e.target.value.replace(/\.mp4$/i, '') + '.mp4')}
+                      placeholder="Имя файла"
+                    />
+                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', flexShrink: 0 }}>.mp4</span>
+                  </div>
+                  <button className="btn btn-download pulse-anim" onClick={handleDownload} style={{ width: '100%' }}>
+                    ⬇ Скачать видео
+                  </button>
+                </>
               ) : (
                 <>
                   <button 
