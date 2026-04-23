@@ -27,6 +27,8 @@ function App() {
   const [processing, setProcessing] = useState(false);
   const [logs, setLogs] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [resultBlob, setResultBlob] = useState(null);
+  const [resultFileName, setResultFileName] = useState('');
 
   const load = async () => {
     const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm'
@@ -241,6 +243,7 @@ function App() {
       setLogs(prev => [...prev, `Обрезка: ${startTime.toFixed(2)}с → ${endTime.toFixed(2)}с (скорость: ${playbackSpeed}x)...`]);
 
       const args = [
+        '-y',
         '-i', inputName
       ];
 
@@ -284,7 +287,7 @@ function App() {
         args.push('-map', '[vout]', '-map', '0:a?');
         
         if (playbackSpeed !== 1.0) {
-          args.push('-filter:a', `atempo=${playbackSpeed.toFixed(2)}`);
+          args.push('-af', `atempo=${playbackSpeed.toFixed(2)}`);
         }
       } else {
         if (playbackSpeed !== 1.0) {
@@ -293,47 +296,64 @@ function App() {
             '-af', `atempo=${playbackSpeed.toFixed(2)}`
           );
         } else {
-          args.push('-map', '0'); // Если без фильтров, переносим все потоки (субтитры и т.д.)
+          args.push('-c', 'copy');
         }
       }
       
       args.push(outputName);
 
-      // Полное перекодирование
+      // Логируем команду для отладки
+      setLogs(prev => [...prev, `FFmpeg команда: ffmpeg ${args.join(' ')}`]);
+      
       const ret = await ffmpeg.exec(args);
       
       if (ret !== 0) {
         throw new Error(`FFmpeg завершился с ошибкой (код ${ret}). Проверьте логи выше.`);
       }
 
-      const data = await ffmpeg.readFile(outputName);
+      let data;
+      try {
+        data = await ffmpeg.readFile(outputName);
+      } catch (readErr) {
+        throw new Error('Не удалось прочитать выходной файл. FFmpeg мог не создать его.');
+      }
       
-      if (!data || data.length === 0) {
+      if (!data || data.byteLength === 0) {
         throw new Error('Получен пустой файл. Попробуйте изменить интервал обрезки.');
       }
 
-      setLogs(prev => [...prev, `Результат: ${(data.length / 1024 / 1024).toFixed(2)} MB`]);
+      const sizeInMB = (data.byteLength / 1024 / 1024).toFixed(2);
+      setLogs(prev => [...prev, `✅ Обработка завершена! Размер: ${sizeInMB} MB`]);
 
-      // Создаём blob
-      const blob = new Blob([data], { type: 'video/mp4' });
+      // Создаём blob — сохраняем в state, чтобы пользователь скачал по клику
+      const blob = new Blob([data.buffer], { type: 'video/mp4' });
       const safeName = `cut_${sanitizeFileName(videoFile.name)}.mp4`;
       
-      setLogs(prev => [...prev, `Сохранение файла...`]);
-      await saveFileDirectly(blob, safeName);
+      setResultBlob(blob);
+      setResultFileName(safeName);
+      setLogs(prev => [...prev, '⬇️ Нажмите кнопку "Скачать" для сохранения файла.']);
+      
+      // Очищаем файлы из виртуальной FS FFmpeg
+      try {
+        await ffmpeg.deleteFile(inputName);
+        await ffmpeg.deleteFile(outputName);
+      } catch (_) { /* игнорируем ошибки очистки */ }
     } catch (err) {
-      console.error(err);
+      console.error('Trim error:', err);
       setLogs(prev => [...prev, 'ОШИБКА: ' + err.message]);
     } finally {
       setProcessing(false);
     }
   }
 
-  const saveFileDirectly = async (blob, fileName) => {
+  // Сохранение по клику пользователя (свежий user gesture → showSaveFilePicker работает)
+  const handleDownload = async () => {
+    if (!resultBlob) return;
+    
     if (window.showSaveFilePicker) {
       try {
-        // Если есть handle исходного файла, открываем диалог в той же папке
         const opts = {
-          suggestedName: fileName,
+          suggestedName: resultFileName,
           types: [{
             description: 'MP4 Видео',
             accept: { 'video/mp4': ['.mp4'] }
@@ -344,47 +364,72 @@ function App() {
         }
         const handle = await window.showSaveFilePicker(opts);
         const writable = await handle.createWritable();
-        await writable.write(blob);
+        await writable.write(resultBlob);
         await writable.close();
         setLogs(prev => [...prev, '✅ Файл успешно сохранён!']);
+        setResultBlob(null);
+        setResultFileName('');
         return;
       } catch (err) {
         if (err.name === 'AbortError') {
-          setLogs(prev => [...prev, 'Сохранение отменено.']);
+          setLogs(prev => [...prev, 'Сохранение отменено пользователем.']);
           return;
         }
-        console.warn('showSaveFilePicker failed', err);
+        console.warn('showSaveFilePicker failed, using fallback', err);
       }
     }
 
-    // Фоллбэк
-    const reader = new FileReader();
-    reader.onload = () => {
-      const a = document.createElement('a');
-      a.href = reader.result;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => document.body.removeChild(a), 200);
-      setLogs(prev => [...prev, '✅ Файл успешно сохранён!']);
-    };
-    reader.readAsDataURL(blob);
+    // Фоллбэк через URL.createObjectURL
+    const url = URL.createObjectURL(resultBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = resultFileName;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 1000);
+    setLogs(prev => [...prev, '✅ Файл скачан через браузер!']);
+    setResultBlob(null);
+    setResultFileName('');
   }
 
-  return (
-    <div className="container">
-      <header style={{ textAlign: 'center', marginBottom: '3rem' }}>
-        <h1>Bimba Video Cutter</h1>
-        <p className="subtitle">Локальная обрезка видео без потери качества и серверов</p>
-      </header>
+  const formatTime = (t) => {
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t % 60);
+    const ms = Math.round((t % 1) * 100);
+    return `${m}:${String(s).padStart(2, '0')}.${String(ms).padStart(2, '0')}`;
+  };
 
-      <main className="glass" style={{ padding: '2rem', maxWidth: '1400px', margin: '0 auto', width: '100%' }}>
-        {!videoFile ? (
+  const speedPresets = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+  const [logsExpanded, setLogsExpanded] = useState(false);
+  const lastLog = logs.length > 0 ? logs[logs.length - 1] : 'Готов к работе';
+
+  return (
+    <div className="app-container">
+      {/* Header */}
+      <div className="app-header">
+        <h1>✂ Bimba Video Cutter</h1>
+        <div className="header-status">
+          <span className={`status-dot ${loaded ? 'ready' : 'loading'}`} />
+          <span>{loaded ? 'FFmpeg готов' : 'Загрузка FFmpeg...'}</span>
+          {processing && (
+            <span className="processing-badge">
+              <span style={{ animation: 'blink 1s infinite' }}>●</span> Обработка...
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Main Editor */}
+      {!videoFile ? (
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
           <div 
             className="upload-zone"
             style={{ 
               borderColor: isDragging ? 'var(--accent-color)' : 'var(--border-color)',
-              background: isDragging ? 'rgba(139, 92, 246, 0.1)' : 'transparent'
+              background: isDragging ? 'rgba(139, 92, 246, 0.08)' : 'transparent'
             }}
             onClick={openFilePicker}
             onDragOver={handleDragOver}
@@ -392,51 +437,33 @@ function App() {
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
           >
-            <div style={{ background: 'rgba(139, 92, 246, 0.1)', padding: '2rem', borderRadius: '50%', marginBottom: '1rem' }}>
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <div style={{ background: 'rgba(139, 92, 246, 0.1)', padding: '1.5rem', borderRadius: '50%' }}>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" strokeWidth="2">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
               </svg>
             </div>
-            <span style={{ fontSize: '1.2rem', fontWeight: '500' }}>Перетащите видео или нажмите для выбора</span>
-            <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Поддерживаются MP4, MOV, MKV и др.</span>
+            <span style={{ fontSize: '1.1rem', fontWeight: '500' }}>Перетащите видео или нажмите для выбора</span>
+            <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>MP4, MOV, MKV, AVI, WebM</span>
           </div>
-        ) : (
-          <div className="editor-layout" style={{ display: 'flex', gap: '2rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
-            {/* Левая колонка: Видео */}
-            <div 
-              style={{ 
-                flex: '1 1 60%',
-                position: 'relative', 
-                display: 'flex', 
-                justifyContent: 'center'
-              }}
-            >
-              <div 
-                ref={videoContainerRef}
-                style={{ 
-                  position: 'relative', 
-                  borderRadius: '16px', 
-                  overflow: 'hidden', 
-                  background: '#000',
-                  boxShadow: '0 4px 20px rgba(0, 0, 0, 0.5)',
-                  display: 'inline-block'
-                }}
-              >
-                <video 
-                  ref={videoRef}
-                  src={videoUrl} 
-                  controls 
-                  autoPlay
-                  onLoadedMetadata={onVideoLoad}
-                  onTimeUpdate={handleTimeUpdate}
-                  style={{ maxWidth: '100%', maxHeight: '60vh', display: 'block' }}
-                />
-                {watermarkUrl && (
-                  <img 
-                    ref={watermarkImgRef}
-                    src={watermarkUrl} 
-                    alt="Watermark" 
-
+        </div>
+      ) : (
+        <div className="editor-body">
+          {/* Video */}
+          <div className="video-area">
+            <div className="video-wrapper" ref={videoContainerRef}>
+              <video 
+                ref={videoRef}
+                src={videoUrl} 
+                controls 
+                autoPlay
+                onLoadedMetadata={onVideoLoad}
+                onTimeUpdate={handleTimeUpdate}
+              />
+              {watermarkUrl && (
+                <img 
+                  ref={watermarkImgRef}
+                  src={watermarkUrl} 
+                  alt="Watermark"
                   style={{
                     position: 'absolute',
                     left: `${watermarkPos.x}%`,
@@ -454,182 +481,167 @@ function App() {
                   draggable="false"
                 />
               )}
-              </div>
             </div>
-            
-            {/* Правая колонка: Управление */}
-            <div style={{ flex: '1 1 35%', display: 'flex', flexDirection: 'column', gap: '1rem', minWidth: '320px' }}>
-              <div className="controls-grid" style={{ background: 'rgba(0,0,0,0.2)', padding: '1.2rem', borderRadius: '16px', marginTop: 0 }}>
-              <div className="control-group">
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <label>Начало</label>
-                  <span style={{ color: 'var(--accent-color)', fontWeight: '700' }}>{startTime.toFixed(2)}с</span>
+          </div>
+
+          {/* Controls Panel */}
+          <div className="controls-panel">
+            <div className="controls-scroll">
+              {/* ── Trim ── */}
+              <div className="ctrl-section">
+                <div className="ctrl-section-title">✂ Обрезка</div>
+                
+                <div className="ctrl-row">
+                  <span className="ctrl-label">Начало</span>
+                  <span className="ctrl-value">{formatTime(startTime)}</span>
                 </div>
                 <input 
-                  type="range" 
-                  min="0" 
-                  max={duration} 
-                  step="0.01" 
-                  value={startTime}
+                  type="range" min="0" max={duration} step="0.01" value={startTime}
                   onChange={(e) => {
                     const val = Math.min(parseFloat(e.target.value), endTime - 0.1);
                     setStartTime(val);
                     if (videoRef.current) videoRef.current.currentTime = val;
                   }}
                 />
-              </div>
-              
-              <div className="control-group">
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <label>Конец</label>
-                  <span style={{ color: 'var(--accent-color)', fontWeight: '700' }}>{endTime.toFixed(2)}с</span>
+
+                <div className="ctrl-row" style={{ marginTop: '0.4rem' }}>
+                  <span className="ctrl-label">Конец</span>
+                  <span className="ctrl-value">{formatTime(endTime)}</span>
                 </div>
                 <input 
-                  type="range" 
-                  min="0" 
-                  max={duration} 
-                  step="0.01" 
-                  value={endTime}
+                  type="range" min="0" max={duration} step="0.01" value={endTime}
                   onChange={(e) => {
                     const val = Math.max(parseFloat(e.target.value), startTime + 0.1);
                     setEndTime(val);
-                    // При изменении конца показываем кадр конца
                     if (videoRef.current) videoRef.current.currentTime = val;
                   }}
                 />
+
+                <div className="time-display" style={{ marginTop: '0.3rem' }}>
+                  <span>Длительность: <strong style={{ color: 'var(--accent-color)' }}>{formatTime(endTime - startTime)}</strong></span>
+                  <span style={{ marginLeft: 'auto' }}>из {formatTime(duration)}</span>
+                </div>
               </div>
-              
-              <div className="control-group">
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                  <label>Скорость воспроизведения</label>
-                  <span style={{ color: 'var(--accent-color)', fontWeight: '700' }}>{playbackSpeed.toFixed(1)}x</span>
+
+              {/* ── Speed ── */}
+              <div className="ctrl-section" style={{ borderColor: 'rgba(139, 92, 246, 0.15)' }}>
+                <div className="ctrl-section-title">⚡ Скорость</div>
+                
+                <div className="ctrl-row">
+                  <span className="ctrl-label">Множитель</span>
+                  <span className="ctrl-value" style={{ fontSize: '1.1rem' }}>{playbackSpeed.toFixed(2)}x</span>
                 </div>
                 <input 
-                  type="range" 
-                  min="0.5" 
-                  max="10.0" 
-                  step="0.1" 
-                  value={playbackSpeed}
+                  className="speed-slider"
+                  type="range" min="0.1" max="5.0" step="0.05" value={playbackSpeed}
                   onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}
                 />
-              </div>
-            </div>
-
-            <div className="controls-grid" style={{ background: 'rgba(0,0,0,0.2)', padding: '1.2rem', borderRadius: '16px', marginTop: 0 }}>
-              <div className="control-group">
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                  <label>Водяной знак</label>
-                  {watermarkFile && (
-                    <span 
-                      style={{ color: '#ef4444', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}
-                      onClick={() => { setWatermarkFile(null); setWatermarkUrl(''); }}
+                
+                <div className="speed-presets">
+                  {speedPresets.map(sp => (
+                    <button 
+                      key={sp}
+                      className={`speed-btn ${Math.abs(playbackSpeed - sp) < 0.01 ? 'active' : ''}`}
+                      onClick={() => setPlaybackSpeed(sp)}
                     >
-                      Удалить
+                      {sp}x
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* ── Watermark ── */}
+              <div className="ctrl-section">
+                <div className="ctrl-row">
+                  <span className="ctrl-section-title" style={{ marginBottom: 0 }}>🖼 Водяной знак</span>
+                  {watermarkFile && (
+                    <span className="wm-remove" onClick={() => { setWatermarkFile(null); setWatermarkUrl(''); }}>
+                      ✕ Убрать
                     </span>
                   )}
                 </div>
-                <button className="btn" onClick={openWatermarkPicker} style={{ background: 'rgba(255,255,255,0.05)', color: '#fff', width: '100%' }}>
-                  {watermarkFile ? 'Заменить картинку' : '+ Загрузить логотип'}
+                
+                <button className="wm-btn" onClick={openWatermarkPicker} style={{ marginTop: '0.4rem' }}>
+                  {watermarkFile ? '↻ Заменить' : '+ Загрузить логотип'}
                 </button>
-              </div>
 
-              {watermarkFile && (
-                <>
-                  <div className="control-group" style={{ marginBottom: '1rem' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                      <label>Прозрачность</label>
-                      <span style={{ color: 'var(--accent-color)', fontWeight: '700' }}>{Math.round(watermarkOpacity * 100)}%</span>
+                {watermarkFile && (
+                  <>
+                    <div className="ctrl-row" style={{ marginTop: '0.6rem' }}>
+                      <span className="ctrl-label">Прозрачность</span>
+                      <span className="ctrl-value">{Math.round(watermarkOpacity * 100)}%</span>
                     </div>
                     <input 
-                      type="range" 
-                      min="0.1" 
-                      max="1.0" 
-                      step="0.05" 
-                      value={watermarkOpacity}
+                      type="range" min="0.1" max="1.0" step="0.05" value={watermarkOpacity}
                       onChange={(e) => setWatermarkOpacity(parseFloat(e.target.value))}
                     />
-                  </div>
-                  <div className="control-group">
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                      <label>Размер</label>
-                      <span style={{ color: 'var(--accent-color)', fontWeight: '700' }}>{watermarkScale}%</span>
+                    
+                    <div className="ctrl-row" style={{ marginTop: '0.3rem' }}>
+                      <span className="ctrl-label">Размер</span>
+                      <span className="ctrl-value">{watermarkScale}%</span>
                     </div>
                     <input 
-                      type="range" 
-                      min="5" 
-                      max="100" 
-                      step="1" 
-                      value={watermarkScale}
+                      type="range" min="5" max="100" step="1" value={watermarkScale}
                       onChange={(e) => setWatermarkScale(parseInt(e.target.value, 10))}
                     />
-                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.5rem', textAlign: 'center' }}>
-                      Перетаскивайте логотип прямо на видео
+                    <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', textAlign: 'center', marginTop: '0.3rem' }}>
+                      Перетаскивайте логотип на видео
                     </div>
-                  </div>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="btn-actions">
+              {resultBlob ? (
+                <button className="btn btn-download pulse-anim" onClick={handleDownload}>
+                  ⬇ Скачать видео
+                </button>
+              ) : (
+                <>
+                  <button 
+                    className="btn btn-primary" 
+                    onClick={trim} 
+                    disabled={!loaded || processing}
+                    style={{ flex: 2 }}
+                  >
+                    {processing ? '⏳ Обработка...' : '✂ Обрезать'}
+                  </button>
+                  <button 
+                    className="btn btn-ghost" 
+                    onClick={() => { setVideoFile(null); setResultBlob(null); }} 
+                    disabled={processing}
+                  >
+                    ✕
+                  </button>
                 </>
               )}
             </div>
-
-            <div style={{ marginTop: '1.5rem', display: 'flex', gap: '1.5rem', justifyContent: 'center' }}>
-              <button 
-                className="btn btn-primary" 
-                onClick={trim} 
-                disabled={!loaded || processing}
-                style={{ minWidth: '220px' }}
-              >
-                {processing ? (
-                  <>
-                    <div className="pulse" style={{ marginRight: '10px' }}>●</div>
-                    Обработка...
-                  </>
-                ) : (
-                  <>
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: '8px' }}>
-                      <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-                      <line x1="9" y1="3" x2="9" y2="21"/>
-                      <line x1="15" y1="3" x2="15" y2="21"/>
-                    </svg>
-                    Обрезать
-                  </>
-                )}
-              </button>
-              <button className="btn" onClick={() => { setVideoFile(null); }} disabled={processing} style={{ background: 'rgba(255,255,255,0.05)', color: '#fff' }}>
-                Другое видео
-              </button>
-            </div>
-
-            <div className="log-panel" style={{ marginTop: 'auto' }}>
-              <div style={{ marginBottom: '0.8rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--text-secondary)' }}>Консоль FFmpeg</span>
-            <span className="status-badge" style={{ 
-              background: loaded ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
-              color: loaded ? '#10b981' : '#f59e0b',
-              border: `1px solid ${loaded ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)'}`
-            }}>
-              {loaded ? 'Система готова' : 'Инициализация...'}
-            </span>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            {logs.length === 0 && <div style={{ color: 'var(--text-secondary)', fontStyle: 'italic' }}>Ожидание действий...</div>}
-            {logs.map((log, i) => (
-              <div key={i} style={{ color: log.includes('Error') ? '#ef4444' : 'inherit' }}>
-                <span style={{ color: 'var(--accent-color)', marginRight: '8px' }}>$</span>
-                {log}
-              </div>
-            ))}
           </div>
         </div>
+      )}
 
+      {/* Status Bar */}
+      <div className="status-bar">
+        <span className="last-log">{lastLog}</span>
+        <span className="toggle-logs" onClick={() => setLogsExpanded(!logsExpanded)}>
+          {logsExpanded ? '▾ Свернуть' : '▸ Логи'}
+        </span>
+      </div>
+      {logsExpanded && (
+        <div className="logs-expanded">
+          {logs.map((log, i) => (
+            <div key={i} style={{ color: log.includes('ОШИБКА') ? 'var(--error-color)' : 'inherit' }}>
+              <span style={{ color: 'var(--accent-color)', marginRight: '6px' }}>$</span>
+              {log}
             </div>
-          </div>
-        )}
-      </main>
-
-      <footer style={{ marginTop: '4rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-        <p>&copy; 2024 Bimba Video Cutter. Все вычисления происходят на вашем устройстве.</p>
-      </footer>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
 
 export default App
+
